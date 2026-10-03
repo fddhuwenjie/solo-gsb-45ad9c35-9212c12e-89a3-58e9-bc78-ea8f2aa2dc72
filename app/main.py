@@ -22,6 +22,7 @@ from .issuance import (
     snapshot_fingerprint,
     validate_snapshot,
 )
+from .audit import audit_versions
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DATA_DIR = os.environ.get("DATA_DIR", os.path.join(BASE_DIR, "..", "data"))
@@ -305,9 +306,7 @@ def _version_row_to_dict(row: sqlite3.Row, include_snapshot: bool) -> dict:
 @app.get("/api/drafts/{draft_id}/versions")
 def list_versions(draft_id: int) -> list[dict]:
     with db() as conn:
-        if conn.execute("SELECT 1 FROM drafts WHERE id=?", (draft_id,)
-                        ).fetchone() is None:
-            raise HTTPException(status_code=404, detail="草稿不存在")
+        # 草稿删除后其不可变版本仍保留、可读：这里不再要求草稿行存在。
         rows = conn.execute(
             "SELECT * FROM versions WHERE draft_id=? "
             "ORDER BY version_no DESC", (draft_id,)
@@ -425,6 +424,38 @@ def get_version(version_id: int) -> dict:
     payload = _version_row_to_dict(row, include_snapshot=True)
     payload["issued"] = False
     return payload
+
+
+class AuditRequest(BaseModel):
+    # 审计方向固定为 old_version → new_version（均须为同一草稿的已签发版本）
+    old_version_id: int
+    new_version_id: int
+
+
+@app.post("/api/versions/audit")
+def audit(req: AuditRequest) -> dict:
+    """版本差异审计：对齐同一草稿的两份不可变快照。
+
+    只读取 versions 行：草稿后续编辑 / 删除均不影响审计结果。
+    两版非同草稿或指向同一版本 → 400；版本不存在 → 404。
+    """
+    with db() as conn:
+        rows = {
+            r["id"]: r
+            for r in conn.execute(
+                "SELECT * FROM versions WHERE id IN (?, ?)",
+                (req.old_version_id, req.new_version_id),
+            ).fetchall()
+        }
+    old_row = rows.get(req.old_version_id)
+    new_row = rows.get(req.new_version_id)
+    if old_row is None or new_row is None:
+        missing = req.old_version_id if old_row is None else req.new_version_id
+        raise HTTPException(status_code=404, detail=f"版本不存在：{missing}")
+    try:
+        return audit_versions(old_row, new_row)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
 
 
 # ---------------------------------------------------------------- 静态页面

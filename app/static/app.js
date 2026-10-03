@@ -46,6 +46,11 @@ const els = {
   issueSuccess: $("#issue-success"),
   versionList: $("#version-list"),
   versionViewer: $("#version-viewer"),
+  auditOld: $("#audit-old"),
+  auditNew: $("#audit-new"),
+  btnAudit: $("#btn-audit"),
+  auditStatus: $("#audit-status"),
+  auditResult: $("#audit-result"),
 };
 
 // 运行时状态
@@ -73,6 +78,8 @@ const state = {
   versionsLoadedFor: null,
   activeVersion: null,  // 正在查看的版本详情
   issueBusy: false,
+  // 版本差异审计（只读不可变快照；结果缓存于前端，不随后续草稿变化而失效）
+  audit: { oldId: null, newId: null, result: null, busy: false },
 };
 
 const LS_KEY = "clause-rebench-session";
@@ -1302,6 +1309,7 @@ async function doIssue(retriedAfterStale) {
     toast(res.reused ? `同一草稿重复提交，返回原版本 v${res.version_no}`
       : `生效版本 v${res.version_no} 已签发`);
     await refreshVersionList();
+    renderAuditForm();
     await openVersion(res.id);
     refreshDrafts(state.currentDraftId);
   } catch (e) {
@@ -1364,6 +1372,7 @@ async function refreshVersionList() {
     state.versions = [];
     state.versionsLoadedFor = null;
     renderVersionList();
+    renderAuditForm();
     return;
   }
   try {
@@ -1374,6 +1383,7 @@ async function refreshVersionList() {
     state.versions = [];
   }
   renderVersionList();
+  renderAuditForm();
 }
 
 function fmtTime(ts) {
@@ -1680,6 +1690,341 @@ function renderVersionViewer(v) {
   els.versionViewer.scrollIntoView({ behavior: "smooth", block: "start" });
 }
 
+// ================================================================ 版本差异审计
+
+const AUDIT_KIND_LABELS = {
+  body_changed: ["正文改变", "warn"],
+  reorder: ["层级 / 顺序调整", "primary"],
+  numbering_only: ["仅编号改写", "muted"],
+  removed: ["删除", "danger"],
+  lifecycle_deleted: ["删除", "danger"],
+  added: ["新增", "ok"],
+  lifecycle_restored: ["恢复存活", "ok"],
+  ref_changed: ["引用改写", "warn"],
+  ref_added: ["新增引用", "ok"],
+  ref_removed: ["引用消失", "danger"],
+  term_use_added: ["术语使用新增", "ok"],
+  term_use_removed: ["术语使用消失", "muted"],
+  term_binding_lost: ["术语绑定丢失", "danger"],
+  term_binding_ambiguous: ["术语绑定变歧义", "purple"],
+  term_binding_changed: ["术语改绑", "cyan"],
+};
+
+function auditKindTag(kind) {
+  const [label, cls] = AUDIT_KIND_LABELS[kind] || [kind, "muted"];
+  return `<span class="audit-tag tag-${cls}">${label}</span>`;
+}
+
+function renderAuditForm() {
+  const opts = (sel, keepId) => {
+    const prev = keepId;
+    sel.innerHTML = `<option value="">— 选择版本 —</option>` +
+      state.versions.map((v) =>
+        `<option value="${v.id}"${String(v.id) === String(prev) ? " selected" : ""}>`
+        + `v${v.version_no}（修订 ${v.revision} · ${fmtTime(v.issued_at)}）</option>`)
+        .join("");
+  };
+  opts(els.auditOld, state.audit.oldId);
+  opts(els.auditNew, state.audit.newId);
+  const ok = els.auditOld.value && els.auditNew.value
+    && els.auditOld.value !== els.auditNew.value;
+  els.btnAudit.disabled = !ok || state.audit.busy;
+}
+
+async function runAudit() {
+  const oldId = Number(els.auditOld.value);
+  const newId = Number(els.auditNew.value);
+  if (!oldId || !newId || oldId === newId) return;
+  state.audit.busy = true;
+  els.btnAudit.disabled = true;
+  els.btnAudit.textContent = "审计中…";
+  els.auditStatus.textContent = "";
+  try {
+    const res = await api("/api/versions/audit", {
+      method: "POST",
+      body: JSON.stringify({ old_version_id: oldId, new_version_id: newId }),
+    });
+    state.audit = { oldId, newId, result: res, busy: false };
+    renderAuditResult(res);
+    toast(`v${res.old.version_no} → v${res.new.version_no} 差异审计已生成`);
+  } catch (e) {
+    state.audit.busy = false;
+    els.auditStatus.textContent = "审计失败：" + e.message;
+    els.btnAudit.textContent = "🔍 生成版本差异审计";
+    renderAuditForm();
+  }
+}
+
+function auditLoc(loc) {
+  if (!loc || !loc.present) return `<span class="audit-loc missing">不存在</span>`;
+  const num = loc.issued_label || loc.label || "";
+  const stateTxt = loc.alive ? "" : ` · <em>该版已删除</em>`;
+  return `<span class="audit-loc${loc.alive ? "" : " dead"}">`
+    + `<b>${esc(num)}</b>${stateTxt}</span>`;
+}
+
+function renderAuditResult(a) {
+  els.btnAudit.textContent = "🔍 生成版本差异审计";
+  const box = els.auditResult;
+  box.classList.remove("hidden");
+  box.innerHTML = "";
+  const c = a.counts;
+
+  const head = document.createElement("div");
+  head.className = "audit-head";
+  head.innerHTML =
+    `<div class="audit-title">差异审计：<b>v${a.old.version_no}</b>（修订 ${a.old.revision}）`
+    + ` → <b>v${a.new.version_no}</b>（修订 ${a.new.revision}）</div>`
+    + `<div class="audit-counts">`
+    + `<span>正文改变 <b>${c.clause_body}</b></span>`
+    + `<span>层级/顺序 <b>${c.clause_reorder}</b></span>`
+    + `<span>仅编号改写 <b>${c.clause_numbering_only}</b></span>`
+    + `<span class="tc-danger">删除 <b>${c.clause_removed}</b></span>`
+    + `<span class="tc-ok">新增 <b>${c.clause_added}</b></span>`
+    + `<span>引用差异 <b>${c.ref_changed}</b></span>`
+    + `<span>术语差异 <b>${c.term_changed}</b></span>`
+    + (c.preamble_changed ? `<span class="tc-warn">前置说明已改</span>` : "")
+    + `</div>`;
+  box.appendChild(head);
+
+  // 条款差异
+  box.appendChild(auditSection(
+    "条款差异（按原条款稳定 ID 对齐；点击行在下方两版快照中定位该条款）",
+    a.clause_diffs, (d) => {
+      const row = document.createElement("button");
+      row.type = "button";
+      row.className = "audit-row";
+      const oldLoc = d.old ? auditLoc(d.old) : `<span class="audit-loc missing">无</span>`;
+      const newLoc = d.new ? auditLoc(d.new) : `<span class="audit-loc missing">无</span>`;
+      row.innerHTML =
+        auditKindTag(d.kind) +
+        `<span class="audit-locs">${oldLoc}<span class="audit-arrow">→</span>${newLoc}</span>`
+        + `<span class="audit-msg">${esc(d.message)}</span>`;
+      row.addEventListener("click", () =>
+        auditLocate(d.clause_id, d.clause_id));
+      return row;
+    }));
+
+  // 引用差异
+  box.appendChild(auditSection(
+    "引用差异（逐条比较目标集合、区间表达与原文；点击定位引用所在条款 / 目标）",
+    a.ref_diffs, (d) => {
+      const row = document.createElement("button");
+      row.type = "button";
+      row.className = "audit-row";
+      const detail = document.createElement("span");
+      detail.className = "audit-msg";
+      detail.textContent = d.message;
+      const refs = document.createElement("span");
+      refs.className = "audit-refcmp";
+      refs.innerHTML = d.old
+        ? `<span class="rc-old">${esc(d.old.expr)}</span><span class="audit-arrow">→</span>`
+        : "";
+      refs.innerHTML += d.new
+        ? `<span class="rc-new">${esc(d.new.expr)}</span>`
+        : "";
+      row.innerHTML = auditKindTag(d.kind)
+        + `<span class="audit-locs"><span class="audit-loc">`
+        + `${esc(d.owner_old_label || "")}<span class="audit-arrow">→</span>${esc(d.owner_new_label || "")}`
+        + `</span></span>`;
+      row.appendChild(refs);
+      row.appendChild(detail);
+      const targetIds = (d.targets || []).map((t) => t.clause_id);
+      row.addEventListener("click", () =>
+        auditLocate(d.clause_id, d.clause_id, targetIds));
+      return row;
+    }));
+
+  // 术语差异
+  box.appendChild(auditSection(
+    "术语绑定差异（按出现处对齐，比较每处使用绑定的定义）",
+    a.term_diffs, (d) => {
+      const row = document.createElement("button");
+      row.type = "button";
+      row.className = "audit-row";
+      const where = d.in_preamble ? "前置说明" : "条款内";
+      row.innerHTML = auditKindTag(d.kind)
+        + `<span class="audit-locs"><span class="audit-loc">${esc(where)}</span></span>`
+        + `<span class="audit-msg">${esc(d.message)}</span>`;
+      row.addEventListener("click", () => auditLocate(
+        d.in_preamble ? "preamble" : d.block_id,
+        d.in_preamble ? "preamble" : d.block_id));
+      return row;
+    }));
+
+  // 最短受影响链
+  const impacts = a.impacts || [];
+  box.appendChild(auditSection(
+    "最短受影响链（基于新版存活引用图：SCC 合并循环组，沿反向引用 BFS；链上节点、根因均可点击定位两版条款）",
+    impacts, (im) => {
+      const wrap = document.createElement("div");
+      wrap.className = "audit-impact" + (im.cycle ? " is-cycle" : "");
+      const top = document.createElement("button");
+      top.type = "button";
+      top.className = "audit-row impact-top";
+      top.innerHTML =
+        `<span class="audit-tag tag-${im.cycle ? "purple" : "danger"}">`
+        + `${im.distance === 0 ? "直接影响" : `传导 ${im.distance} 跳`}</span>`
+        + `<span class="audit-locs"><span class="audit-loc">${im.cycle ? "↺ " : ""}${esc(im.label)}</span></span>`
+        + `<span class="audit-msg">${im.details.length} 项直接差异</span>`;
+      top.addEventListener("click", () =>
+        auditLocate(im.clause_id, im.clause_id, im.member_ids));
+      wrap.appendChild(top);
+
+      const chain = document.createElement("div");
+      chain.className = "audit-chain";
+      im.chain.forEach((step, idx) => {
+        if (idx > 0) chain.appendChild(arrowNode("▸"));
+        const node = document.createElement("button");
+        node.type = "button";
+        node.className = "audit-chain-node"
+          + (step.kind === "group" ? " is-group" : "")
+          + (step.terminal ? " terminal" : "");
+        node.textContent = (step.cycle ? "↺ " : "")
+          + step.members.map((m) => m.label).join("、")
+          + (step.terminal && step.members[0] && step.members[0].alive_new === false
+            ? "（新版已删除）" : "");
+        const ids = step.members.map((m) => m.id).filter((x) => x !== "preamble");
+        node.addEventListener("click", () => auditLocate(
+          step.kind === "preamble" ? "preamble" : (ids[0] || null),
+          step.kind === "preamble" ? "preamble" : (ids[0] || null),
+          ids));
+        chain.appendChild(node);
+      });
+      wrap.appendChild(chain);
+
+      (im.details || []).forEach((det) => {
+        const d = document.createElement("div");
+        d.className = "audit-detail";
+        d.textContent = "· " + det.message;
+        d.addEventListener("click", () =>
+          auditLocate(det.owner_id, det.owner_id));
+        wrap.appendChild(d);
+      });
+      return wrap;
+    }));
+
+  renderAuditSides(a);
+  box.scrollIntoView({ behavior: "smooth", block: "start" });
+}
+
+function arrowNode(txt) {
+  const s = document.createElement("span");
+  s.className = "audit-arrow sep";
+  s.textContent = txt;
+  return s;
+}
+
+function auditSection(title, items, render) {
+  const sec = document.createElement("div");
+  sec.className = "audit-section";
+  const t = document.createElement("div");
+  t.className = "audit-section-title";
+  t.textContent = `${title}（${items.length}）`;
+  sec.appendChild(t);
+  if (!items.length) {
+    const e = document.createElement("div");
+    e.className = "audit-empty";
+    e.textContent = "无差异";
+    sec.appendChild(e);
+    return sec;
+  }
+  items.forEach((item) => sec.appendChild(render(item)));
+  return sec;
+}
+
+// ---- 两版并排快照（点击差异行在两侧条款间定位）----
+
+function renderAuditSides(a) {
+  const sec = document.createElement("div");
+  sec.className = "audit-sides";
+  sec.innerHTML = `<div class="audit-section-title">两版条款快照（左：旧版原文；右：新版签发正文，已删除置灰；点击上方差异行可在两侧定位）</div>`;
+  const cols = document.createElement("div");
+  cols.className = "compare-cols";
+  const mkCol = (sideKey, side, mode) => {
+    const col = document.createElement("div");
+    col.className = "col";
+    col.innerHTML =
+      `<div class="col-title">${sideKey === "old" ? "旧版 v" : "新版 v"}${side.version_no}</div>`;
+    const view = document.createElement("div");
+    view.className = "doc-view audit-doc";
+    view.dataset.side = sideKey;
+    if (side.preamble) {
+      const p = document.createElement("div");
+      p.className = "preamble-block clause-block";
+      p.dataset.cid = "preamble";
+      p.textContent = side.preamble;
+      view.appendChild(p);
+    }
+    const deletedIds = new Set((side.deleted_clauses || []).map((c) => c.id));
+    if (mode === "issued") {
+      side.result.forEach((c) => view.appendChild(vMakeBlock(c, "after", false)));
+      (side.deleted_clauses || []).forEach((mini) => {
+        const full = (side.clauses || []).find((c) => c.id === mini.id);
+        if (full) view.appendChild(vMakeBlock(full, "before", true));
+      });
+    }
+    col.appendChild(view);
+    return col;
+  };
+  cols.appendChild(mkCol("old", a.sides.old, "issued"));
+  cols.appendChild(mkCol("new", a.sides.new, "issued"));
+  sec.appendChild(cols);
+  els.auditResult.appendChild(sec);
+}
+
+function auditLocate(oldCid, newCid, alsoIds = []) {
+  const box = els.auditResult;
+  const sides = state.audit.result
+    ? [state.audit.result.sides.old, state.audit.result.sides.new] : [];
+  let scrolled = false;
+  const flash = (view, ids) => {
+    const all = new Set(ids.filter(Boolean));
+    view.querySelectorAll(".clause-block").forEach((node) => {
+      if (all.has(node.dataset.cid)) {
+        if (!scrolled) {
+          node.scrollIntoView({ behavior: "smooth", block: "center" });
+          scrolled = true;
+        }
+        node.classList.remove("flash");
+        void node.offsetWidth;
+        node.classList.add("flash");
+      }
+    });
+  };
+  const oldView = box.querySelector('.audit-doc[data-side="old"]');
+  const newView = box.querySelector('.audit-doc[data-side="new"]');
+  if (oldView) {
+    const valid = new Set(sides[0] ? [
+      ...sides[0].order,
+      ...(sides[0].deleted_clauses || []).map((c) => c.id),
+      "preamble",
+    ] : []);
+    const ids = [oldCid, ...alsoIds].filter((x) => valid.has(x));
+    flash(oldView, ids);
+    if (!scrolled && ids.length) {
+      const n = oldView.querySelector(`[data-cid="${CSS.escape(ids[0])}"]`);
+      if (n) n.scrollIntoView({ behavior: "smooth", block: "center" });
+    }
+  }
+  if (newView) {
+    const valid = new Set(sides[1] ? [
+      ...sides[1].order,
+      ...(sides[1].deleted_clauses || []).map((c) => c.id),
+      "preamble",
+    ] : []);
+    const ids = [newCid, ...alsoIds].filter((x) => valid.has(x));
+    const n = ids.length && newView.querySelector(`[data-cid="${CSS.escape(ids[0])}"]`);
+    if (n && !scrolled) {
+      n.scrollIntoView({ behavior: "smooth", block: "center" });
+      scrolled = true;
+    }
+    flash(newView, ids);
+  }
+  setTimeout(() => box.querySelectorAll(".clause-block.flash")
+    .forEach((n) => n.classList.remove("flash")), 2400);
+}
+
 // ---------------------------------------------------------------- 草稿（SQLite）
 async function refreshDrafts(selectId) {
   try {
@@ -1805,7 +2150,10 @@ async function loadDraft(id) {
   state.savedSnapshot = draftSnapshot();
   state.activeVersion = null;
   state.versionsLoadedFor = null;
+  state.audit = { oldId: null, newId: null, result: null, busy: false };
   els.versionViewer.classList.add("hidden");
+  els.auditResult.classList.add("hidden");
+  els.auditStatus.textContent = "";
   els.issueBlockers.classList.add("hidden");
   els.issueSuccess.classList.add("hidden");
   state.previewSel = [];
@@ -1900,11 +2248,15 @@ function loadExample() {
   state.versions = [];
   state.versionsLoadedFor = null;
   state.activeVersion = null;
+  state.audit = { oldId: null, newId: null, result: null, busy: false };
   state.previewSel = [];
   state.previewResult = null;
   state.previewStale = false;
   els.previewPane.classList.add("hidden");
   els.versionViewer.classList.add("hidden");
+  els.auditResult.classList.add("hidden");
+  els.auditStatus.textContent = "";
+  renderAuditForm();
   els.draftSelect.value = "";
   if (state.mode === "versions") renderIssuePanel();
   runAnalyze(true).then(() => {
@@ -1929,6 +2281,15 @@ els.tabRefs.addEventListener("click", () => switchMode("refs"));
 els.tabTerms.addEventListener("click", () => switchMode("terms"));
 els.tabVersions.addEventListener("click", () => switchMode("versions"));
 els.btnIssue.addEventListener("click", issueVersion);
+els.btnAudit.addEventListener("click", runAudit);
+els.auditOld.addEventListener("change", () => {
+  state.audit.oldId = Number(els.auditOld.value) || null;
+  renderAuditForm();
+});
+els.auditNew.addEventListener("change", () => {
+  state.audit.newId = Number(els.auditNew.value) || null;
+  renderAuditForm();
+});
 els.draftSelect.addEventListener("change", async (e) => {
   if (e.target.value) {
     await loadDraft(Number(e.target.value));

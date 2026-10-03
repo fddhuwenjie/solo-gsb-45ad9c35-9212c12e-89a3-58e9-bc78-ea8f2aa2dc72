@@ -171,6 +171,27 @@
           <div id="version-list" class="version-list"></div>
         </div>
 
+        <div class="panel audit-panel">
+          <div class="panel-head">
+            <h2>版本差异审计</h2>
+            <div class="hint">选择同一草稿的两个已签发版本：按原条款稳定 ID 对齐两份不可变快照，区分正文改变 / 层级顺序调整 / 删除新增 / 仅编号改写，并逐条比较引用目标、区间表达与术语绑定；对目标删除或绑定改变的差异给出最短受影响链（循环组合并）。审计只读版本快照，草稿后续编辑或删除均不影响结果</div>
+          </div>
+          <div class="audit-form">
+            <label class="audit-pick">
+              <span>旧版（基准）</span>
+              <select id="audit-old"><option value="">— 选择版本 —</option></select>
+            </label>
+            <span class="audit-arrow">→</span>
+            <label class="audit-pick">
+              <span>新版（对比）</span>
+              <select id="audit-new"><option value="">— 选择版本 —</option></select>
+            </label>
+            <button id="btn-audit" class="btn btn-primary" type="button" disabled>🔍 生成版本差异审计</button>
+            <span id="audit-status" class="parse-status"></span>
+          </div>
+          <div id="audit-result" class="audit-result hidden"></div>
+        </div>
+
         <div id="version-viewer" class="panel version-viewer hidden"></div>
       </div>
     </section>

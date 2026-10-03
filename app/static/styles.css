@@ -563,3 +563,98 @@ textarea:focus { outline: none; border-color: var(--primary); }
 .vtmark.flash-pair {
   outline: 2px solid var(--flash); background: rgba(255,243,196,.25);
 }
+
+/* ---------------- 版本差异审计 ---------------- */
+.audit-panel .hint { max-width: 1100px; }
+.audit-form {
+  display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
+  margin: 4px 2px 8px;
+}
+.audit-pick { display: flex; flex-direction: column; gap: 3px; font-size: 12px; color: var(--muted); }
+.audit-pick select { min-width: 240px; max-width: 260px; }
+.audit-form .audit-arrow { color: var(--muted); font-size: 16px; }
+.audit-result { margin-top: 10px; }
+.audit-head {
+  display: flex; flex-direction: column; gap: 8px;
+  padding-bottom: 10px; border-bottom: 1px dashed var(--border);
+}
+.audit-title { font-size: 14.5px; }
+.audit-counts { display: flex; flex-wrap: wrap; gap: 8px 16px; font-size: 12.5px; color: var(--muted); }
+.audit-counts b { color: var(--text); }
+.audit-counts .tc-danger { color: var(--danger); }
+.audit-counts .tc-ok { color: var(--ok); }
+.audit-counts .tc-warn { color: var(--warn); }
+
+.audit-section { margin: 14px 0 4px; }
+.audit-section-title {
+  font-size: 12.5px; color: var(--muted); margin: 8px 2px;
+}
+.audit-empty { color: var(--muted); font-size: 12.5px; padding: 4px 2px 8px; }
+.audit-row {
+  display: flex; align-items: flex-start; gap: 10px; width: 100%;
+  text-align: left; background: rgba(255,255,255,.03);
+  border: 1px solid var(--border); border-radius: 8px;
+  padding: 7px 11px; margin-bottom: 6px; cursor: pointer;
+  color: var(--text); font-size: 12.5px; transition: .15s;
+}
+.audit-row:hover { border-color: var(--primary); background: rgba(79,124,255,.08); }
+
+.audit-tag {
+  flex-shrink: 0; font-size: 11px; font-weight: 700; line-height: 1.9;
+  padding: 0 9px; border-radius: 11px; white-space: nowrap;
+  background: rgba(255,255,255,.07);
+}
+.tag-warn { color: var(--warn); background: var(--warn-bg); }
+.tag-danger { color: var(--danger); background: var(--danger-bg); }
+.tag-ok { color: var(--ok); background: var(--ok-bg); }
+.tag-primary { color: var(--primary); background: var(--primary-dim); }
+.tag-purple { color: var(--purple); background: var(--purple-bg); }
+.tag-cyan { color: var(--cyan); background: var(--cyan-bg); }
+.tag-muted { color: var(--muted); }
+
+.audit-locs {
+  flex-shrink: 0; display: flex; align-items: center; gap: 6px;
+  min-width: 150px; font-size: 12px;
+}
+.audit-loc b { color: var(--primary); font-weight: 600; }
+.audit-loc.dead, .audit-loc.dead b { color: var(--danger); }
+.audit-loc.dead em { color: var(--danger); font-style: normal; font-size: 11px; }
+.audit-loc.missing { color: var(--muted); }
+.audit-msg { flex: 1; color: var(--text); }
+.audit-refcmp { flex-shrink: 0; font-size: 12px; display: flex; align-items: center; gap: 5px; }
+.rc-old { color: var(--danger); text-decoration: line-through; opacity: .85; }
+.rc-new { color: var(--ok); }
+.audit-arrow.sep { margin: 0 2px; }
+
+.audit-impact {
+  border: 1px solid var(--border); border-left: 3px solid var(--danger);
+  border-radius: 8px; padding: 8px 10px 6px; margin-bottom: 8px;
+  background: rgba(240,96,96,.05);
+}
+.audit-impact.is-cycle { border-left-color: var(--purple); background: var(--purple-bg); }
+.audit-impact .impact-top { background: transparent; border: none; padding: 2px 0; margin-bottom: 2px; }
+.audit-impact .impact-top:hover { background: rgba(255,255,255,.05); }
+.audit-chain {
+  display: flex; align-items: center; flex-wrap: wrap; gap: 2px;
+  margin: 3px 0 4px 12px;
+}
+.audit-chain-node {
+  border: 1px solid var(--border); background: transparent; color: var(--text);
+  border-radius: 6px; padding: 2px 9px; font-size: 12px; cursor: pointer;
+  transition: .15s; max-width: 260px; overflow: hidden; text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.audit-chain-node:hover { border-color: var(--primary); background: rgba(79,124,255,.12); }
+.audit-chain-node.is-group { border-color: var(--purple); color: var(--purple); }
+.audit-chain-node.terminal { color: var(--danger); border-color: var(--danger); }
+.audit-chain .audit-arrow { color: var(--muted); }
+.audit-detail {
+  margin: 2px 0 2px 12px; font-size: 12px; color: var(--muted);
+  cursor: pointer; border-radius: 5px; padding: 1px 6px;
+}
+.audit-detail:hover { color: var(--text); background: rgba(255,255,255,.06); }
+
+.audit-sides { margin-top: 16px; }
+.audit-doc .clause-block.flash {
+  outline: 2px solid var(--flash); background: rgba(255,243,196,.12);
+}

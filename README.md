@@ -6,7 +6,11 @@
 歧义绑定 / 未使用定义四类问题；删除条款前还可用
 **「删除影响预演」**勾选拟删条款，只读预览引用失效、术语失绑及沿反向引用的
 最短受影响链，确认后再一次性套用级联删除；终审通过的草稿可在
-**「🔖 生效版本」页签一键签发不可变版本**，固定当时的条款编号、引用改写与术语绑定。
+**「🔖 生效版本」页签一键签发不可变版本**，固定当时的条款编号、引用改写与术语绑定；
+同一草稿的任意两个已签发版本还可生成
+**「版本差异审计」**——按原条款稳定 ID 对齐两份快照，区分正文改变 / 层级顺序调整 /
+删除新增 / 仅编号改写，逐条比较引用目标、区间表达与术语绑定，并对目标删除或绑定
+改变的差异从新版存活引用图计算最短受影响链（合并循环组），结果稳定排序且两版可点击定位。
 
 ## 功能
 
@@ -106,6 +110,35 @@
   `GET /api/versions/{id}` 读取；草稿保存 / 载入 / localStorage 暂存与
   Docker Compose 启动方式均保持不变。
 
+### 版本差异审计（「🔖 生效版本」页签内「版本差异审计」）
+
+- **选两版、只对同一草稿**：从同一份草稿的已签发版本中任选**旧版 → 新版**
+  两个不可变版本生成审计；审计接口只读取 `versions` 行，**草稿后续编辑或删除
+  都不影响已生成的审计**（草稿被删除后版本与审计照常可用）。
+- **按原条款稳定 ID 对齐两份快照**：以解析时的原路径 ID（如 `c-3-2`）为身份，
+  逐条给出：
+  - 🟠 **正文改变**（条款原文文本不同）；
+  - 🔵 **层级 / 顺序调整**（所在层级或同父兄弟间相对名次变化）；
+  - ⚪ **仅编号改写**（正文与相对顺序不变，编号仅随重排 / 其他条款删除而变）；
+  - 🔴 **删除 / 新增**（原路径编号在一侧快照消失）以及**删除后恢复存活**。
+- **逐条比较引用**：引用按出现处对齐（位置优先，同条款内序号兜底），区分
+  引用消失 / 新增 / 改写，并分别给出每处的**目标集合变化**、**区间表达变化**
+  （如 `第4条至第5条` 塌缩为 `第4条`）与引用原文变化；被移除 / 新指向的目标
+  均带两版编号定位。
+- **逐条比较术语绑定**：使用处按「同块同名第 k 次」对齐（可抵抗正文位移），
+  比较每处使用绑定的定义（定义以「术语名 + 作用域 + 所在条款 + 同块序」语义键
+  对齐，不依赖会漂移的扫描 ID），区分**绑定丢失**（旧定义在新版消失 / 所在
+  条款删除）、**变歧义**与**改绑**；旧版唯一绑定的无引号使用在新版因定义移除
+  而不再被扫描时也会被找回并计入。
+- **最短受影响链 + 循环组合并**：对「目标已删除」或「绑定改变」的差异，在
+  **新版存活引用图**上求强连通分量（含自环）并收缩为 DAG，循环组只生成一个
+  影响项；在收缩图上沿**反向引用**多源 BFS 给出到根因的最短链（等长链按新版
+  文档顺序取字典序最小者），链尾标注根因条款（新版被删 / 仍存活但被编辑）。
+- **稳定排序与两版定位**：条款 / 引用 / 术语差异与影响行均按新版位置 +
+  类型权重确定性排序；每条差异与链上节点、根因都带**旧版 / 新版编号定位**，
+  页面点击任意差异行或链节点，即在下方**两版并排快照**（旧版原文、新版签发
+  正文，已删除条款置灰）中同时高亮两侧条款。审计结果不写库、不占版本号。
+
 ## 技术栈
 
 - 后端：Python · FastAPI · SQLite（`uvicorn` 提供服务）
@@ -147,6 +180,7 @@ uvicorn app.main:app --reload --port 8000
 | POST | `/api/drafts/{id}/issue` | **生效版本签发**：入参 `{revision}`；阻塞项 → 422（含明细），修订号变化 → 409，重复快照返回原版本 |
 | GET | `/api/drafts/{id}/versions` | 该草稿的不可变版本列表（含摘要，不含正文快照） |
 | GET | `/api/versions/{id}` | 查看单个版本的完整不可变快照（正文、编号、引用改写、术语绑定） |
+| POST | `/api/versions/audit` | **版本差异审计**：入参 `{old_version_id, new_version_id}`，须为同草稿的两个不同版本；返回条款 / 引用 / 术语差异、最短受影响链与两版快照 |
 | GET | `/api/health` | 健康检查 |
 
 签发接口的拒绝响应：
@@ -154,6 +188,114 @@ uvicorn app.main:app --reload --port 8000
 - `422`：`detail.message` 说明拒绝原因，`detail.blockers.reference_issues` 与
   `detail.blockers.term_issues`（已扣除固定忽略项）给出可定位的问题明细；
 - `409`：`detail.current_revision` 为服务器最新修订号，调用方应重新载入草稿后再签。
+
+## 版本差异审计调用示例
+
+> 前置：同一草稿至少有两个已签发版本（签发流程见上文，需先保存草稿拿到
+> `revision` 再调用 `/api/drafts/{id}/issue`）。审计只读不可变版本行，
+> 即使该草稿事后被编辑或删除，下列调用仍然有效。
+
+```bash
+# 1) 列出草稿的已签发版本（草稿删除后该接口仍可用）
+curl -s http://localhost:8000/api/drafts/1/versions
+# [{"id": 2, "version_no": 2, "revision": 3, ...},
+#  {"id": 1, "version_no": 1, "revision": 1, ...}]
+
+# 2) 生成 v1 → v2 的差异审计（方向固定为 旧版 → 新版）
+curl -s -X POST http://localhost:8000/api/versions/audit \
+  -H 'Content-Type: application/json' \
+  -d '{"old_version_id": 1, "new_version_id": 2}'
+```
+
+返回结构（节选）：
+
+```json
+{
+  "old": {"id": 1, "version_no": 1, "revision": 1},
+  "new": {"id": 2, "version_no": 2, "revision": 3},
+  "counts": {
+    "clause_total": 6, "clause_body": 3, "clause_reorder": 0,
+    "clause_numbering_only": 1, "clause_removed": 1, "clause_added": 1,
+    "ref_changed": 4, "ref_target_changed": 2,
+    "term_changed": 1, "term_binding_changed": 1,
+    "impacts": 3, "impact_cycles": 0, "preamble_changed": true
+  },
+  "clause_diffs": [
+    {
+      "kind": "body_changed",
+      "clause_id": "c-3",
+      "flags": {"body_changed": true, "hierarchy_changed": false,
+                "order_changed": true, "numbering_changed": true},
+      "message": "条款正文已修改",
+      "old": {"present": true, "alive": true, "issued_label": "第3条",
+              "position": 4},
+      "new": {"present": true, "alive": true, "issued_label": "第2条",
+              "position": 2}
+    }
+  ],
+  "ref_diffs": [
+    {
+      "kind": "ref_changed",
+      "clause_id": "c-2",
+      "target_changed": true, "expression_changed": true,
+      "targets_removed": ["c-5"],
+      "targets": [
+        {"clause_id": "c-5",
+         "old": {"present": true, "issued_label": "第5条"},
+         "new": {"present": true, "alive": false, "issued_label": "第5条"}}
+      ],
+      "old": {"text": "第4条至第5条", "expr": "第4条至第5条"},
+      "new": {"text": "第4条至第5条", "expr": "第4条"}
+    }
+  ],
+  "term_diffs": [
+    {"kind": "term_binding_lost", "block_id": "c-4", "name": "关联方",
+     "message": "术语“关联方”绑定丢失：……本处变为未定义",
+     "terminal_id": "c-2"}
+  ],
+  "impacts": [
+    {
+      "clause_id": "c-4", "distance": 0, "cycle": false,
+      "label": "第4条",
+      "chain": [
+        {"kind": "clause", "cycle": false, "terminal": false,
+         "members": [{"id": "c-4", "label": "第4条"}]},
+        {"kind": "clause", "cycle": false, "terminal": true,
+         "members": [{"id": "c-2", "label": "第3条", "alive_new": true}]}
+      ],
+      "root_causes": [
+        {"clause_id": "c-2", "alive_new": true,
+         "old": {"issued_label": "第2条"}, "new": {"issued_label": "第3条"}}
+      ],
+      "details": [
+        {"kind": "term_binding_lost",
+         "message": "术语“关联方”绑定丢失……", "owner_id": "c-4"}
+      ]
+    }
+  ],
+  "sides": { "old": {"version_no": 1, "clauses": […], "result": […]},
+             "new": {"version_no": 2, "clauses": […], "result": […]} }
+}
+```
+
+字段要点：
+
+- `clause_diffs[].kind`：`body_changed`（正文改变）/ `reorder`（层级顺序调整）
+  / `numbering_only`（仅编号改写）/ `removed` / `lifecycle_deleted`（删除）
+  / `added` / `lifecycle_restored`（恢复）；`flags` 给出四个维度的细分；
+- `ref_diffs[].kind`：`ref_changed` / `ref_added` / `ref_removed`，
+  `target_changed` 标记目标集合是否变化，`old/new.expr` 为两版签发时的区间 /
+  单条表达，`targets[].new.alive=false` 即「目标在新版被删除」；
+- `term_diffs[].kind`：`term_binding_lost` / `term_binding_ambiguous`
+  / `term_binding_changed` 以及使用本身的新增 / 消失；
+- `impacts[].chain`：新版存活引用图 SCC 收缩后沿反向引用 BFS 的最短链
+  （`distance` 为传播跳数，循环组节点 `cycle=true`、`kind="group"`），
+  链尾 `terminal=true` 为根因条款；`sides` 是供页面并排渲染、点击定位的两版快照。
+
+错误响应：同一版本互比或跨草稿 → `400`；任一版本不存在 → `404`。
+页面操作：打开「🔖 生效版本」页签，在「版本差异审计」中选两个版本后点击
+「🔍 生成版本差异审计」，差异清单与受影响链均可点击，在下方两版快照中定位
+对应条款。
 
 ## 目录结构
 
@@ -165,6 +307,7 @@ app/
   terms.py         定义术语识别、作用域绑定与四类问题审校
   preview.py       删除影响预演：删除前后绑定差异 + 反向引用最短原因链
   issuance.py      生效版本签发：快照固定、终审阻塞项校验、指纹与摘要
+  audit.py         版本差异审计：稳定 ID 对齐、引用/术语差异、SCC 最短受影响链
   static/          前端（index.html / styles.css / app.js，含三个页签）
 data/              SQLite 数据（Docker 中为命名卷 /data，自动创建）
 docker-compose.yml
