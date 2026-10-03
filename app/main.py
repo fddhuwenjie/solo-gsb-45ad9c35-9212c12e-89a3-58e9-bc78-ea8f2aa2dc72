@@ -16,6 +16,7 @@ from .parser import parse_contract
 from .references import analyze, cascade_deleted
 from .terms import review_terms
 from .preview import preview_deletion
+from .diffaudit import compute_audit
 from .issuance import (
     build_summary,
     has_blockers,
@@ -92,6 +93,27 @@ def init_db() -> None:
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_versions_draft "
             "ON versions(draft_id, version_no)"
+        )
+
+        # 版本差异审计：两个不可变版本（旧 → 新）的对齐比较结果。
+        # 结果在生成时固化，草稿后续编辑或删除均不影响已生成审计；
+        # 同一对版本重复审计直接复用（幂等）。
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS audits (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                draft_id INTEGER NOT NULL,
+                from_version_id INTEGER NOT NULL REFERENCES versions(id),
+                to_version_id INTEGER NOT NULL REFERENCES versions(id),
+                result_json TEXT NOT NULL,
+                created_at INTEGER NOT NULL,
+                UNIQUE(from_version_id, to_version_id)
+            )
+            """
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_audits_draft "
+            "ON audits(draft_id, created_at)"
         )
 
 
@@ -425,6 +447,154 @@ def get_version(version_id: int) -> dict:
     payload = _version_row_to_dict(row, include_snapshot=True)
     payload["issued"] = False
     return payload
+
+
+# ---------------------------------------------------------------- 版本差异审计
+
+class AuditRequest(BaseModel):
+    from_version_id: int
+    to_version_id: int
+
+
+def _version_brief(row: sqlite3.Row) -> dict:
+    return {
+        "id": row["id"],
+        "version_no": row["version_no"],
+        "issued_at": row["issued_at"],
+        "title": row["title"],
+    }
+
+
+def _audit_payload(conn: sqlite3.Connection, row: sqlite3.Row,
+                   include_result: bool) -> dict:
+    import json
+    versions = {}
+    for vid in (row["from_version_id"], row["to_version_id"]):
+        v = conn.execute(
+            "SELECT * FROM versions WHERE id=?", (vid,)
+        ).fetchone()
+        if v is not None:
+            versions[vid] = _version_brief(v)
+    result = json.loads(row["result_json"])
+    out = {
+        "id": row["id"],
+        "draft_id": row["draft_id"],
+        "created_at": row["created_at"],
+        "from_version": versions.get(row["from_version_id"]),
+        "to_version": versions.get(row["to_version_id"]),
+        "counts": result["counts"],
+    }
+    if include_result:
+        out["result"] = result
+    return out
+
+
+@app.post("/api/drafts/{draft_id}/audits", status_code=201)
+def create_audit(draft_id: int, req: AuditRequest) -> dict:
+    """对同一草稿的两个已签发版本生成差异审计（旧版 → 新版）。
+
+    - 两个版本必须属于该草稿且互不相同；方向按版本号自动确定
+      （小编号版本为旧版）；
+    - 审计只读取两版不可变快照（正文 / 顺序 / 删除 / 忽略项），
+      与草稿当前状态无关；
+    - 同一对版本的审计只生成一次，重复请求返回原审计（幂等，
+      以 reused=true 表达）；审计生成后即固化，草稿后续编辑或
+      删除均不影响。
+    """
+    import json
+
+    if req.from_version_id == req.to_version_id:
+        raise HTTPException(status_code=400, detail="请选择两个不同的版本")
+
+    with db() as conn:
+        if conn.execute("SELECT 1 FROM drafts WHERE id=?", (draft_id,)
+                        ).fetchone() is None:
+            raise HTTPException(status_code=404, detail="草稿不存在")
+
+        pair = []
+        for vid in (req.from_version_id, req.to_version_id):
+            v = conn.execute(
+                "SELECT * FROM versions WHERE id=?", (vid,)
+            ).fetchone()
+            if v is None:
+                raise HTTPException(status_code=404,
+                                    detail=f"版本不存在：{vid}")
+            if v["draft_id"] != draft_id:
+                raise HTTPException(status_code=400,
+                                    detail="两个版本必须属于同一草稿")
+            pair.append(v)
+        va, vb = sorted(pair, key=lambda r: r["version_no"])  # 旧版 → 新版
+
+        existing = conn.execute(
+            "SELECT * FROM audits WHERE from_version_id=? AND to_version_id=?",
+            (va["id"], vb["id"]),
+        ).fetchone()
+        if existing is not None:
+            payload = _audit_payload(conn, existing, include_result=True)
+            payload["reused"] = True
+            return payload
+
+        result = compute_audit(
+            va["content"], json.loads(va["order_json"]),
+            json.loads(va["deleted_json"]),
+            vb["content"], json.loads(vb["order_json"]),
+            json.loads(vb["deleted_json"]),
+        )
+
+        # 加事务锁后复查：并发期间同一对版本可能已抢先生成
+        conn.execute("BEGIN IMMEDIATE")
+        existing = conn.execute(
+            "SELECT * FROM audits WHERE from_version_id=? AND to_version_id=?",
+            (va["id"], vb["id"]),
+        ).fetchone()
+        if existing is not None:
+            conn.rollback()
+            payload = _audit_payload(conn, existing, include_result=True)
+            payload["reused"] = True
+            return payload
+
+        now = int(time.time())
+        cur = conn.execute(
+            "INSERT INTO audits (draft_id, from_version_id, to_version_id, "
+            "result_json, created_at) VALUES (?, ?, ?, ?, ?)",
+            (draft_id, va["id"], vb["id"],
+             json.dumps(result, ensure_ascii=False), now),
+        )
+        new_id = cur.lastrowid
+        conn.commit()
+        saved = conn.execute(
+            "SELECT * FROM audits WHERE id=?", (new_id,)
+        ).fetchone()
+
+    payload = _audit_payload(conn, saved, include_result=True)
+    payload["reused"] = False
+    return payload
+
+
+@app.get("/api/drafts/{draft_id}/audits")
+def list_audits(draft_id: int) -> list[dict]:
+    """该草稿已生成的差异审计列表（摘要，不含差异明细）。"""
+    with db() as conn:
+        if conn.execute("SELECT 1 FROM drafts WHERE id=?", (draft_id,)
+                        ).fetchone() is None:
+            raise HTTPException(status_code=404, detail="草稿不存在")
+        rows = conn.execute(
+            "SELECT * FROM audits WHERE draft_id=? "
+            "ORDER BY created_at DESC, id DESC", (draft_id,)
+        ).fetchall()
+        return [_audit_payload(conn, r, include_result=False) for r in rows]
+
+
+@app.get("/api/audits/{audit_id}")
+def get_audit(audit_id: int) -> dict:
+    """查看单个已生成的差异审计（草稿删除后仍可读）。"""
+    with db() as conn:
+        row = conn.execute(
+            "SELECT * FROM audits WHERE id=?", (audit_id,)
+        ).fetchone()
+        if row is None:
+            raise HTTPException(status_code=404, detail="审计不存在")
+        return _audit_payload(conn, row, include_result=True)
 
 
 # ---------------------------------------------------------------- 静态页面
